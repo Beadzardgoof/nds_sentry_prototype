@@ -1,0 +1,46 @@
+{
+    "system": {
+        "debug": true,
+        "use_mock_yolo": true,
+        "log_level": "INFO"
+    },
+    "video": {
+        "input_source": "camera",
+        "camera_index": 0,
+        "video_file": null,
+        "target_fps": 30,
+        "resolution": {
+            "width": 1280,
+            "height": 720
+        }
+    },
+    "detection": {
+        "confidence_threshold": 0.5,
+        "nms_threshold": 0.4,
+        "target_classes": ["aircraft", "drone", "helicopter"],
+        "mock_detection_rate": 0.85,
+        "mock_false_positive_rate": 0.05
+    },
+    "tracking": {
+        "success_rate_threshold": 0.8,
+        "prediction_time_horizon": 0.1,
+        "extrapolation_time_horizon": 0.2,
+        "history_length": 10,
+        "velocity_smoothing": 0.7
+    },
+    "servo": {
+        "pan_limits": [-90, 90],
+        "tilt_limits": [-45, 45],
+        "max_speed_deg_per_sec": 180,
+        "smoothing_factor": 0.7,
+        "deadband_threshold": 1.0,
+        "camera_fov": {
+            "horizontal": 90,
+            "vertical": 60
+        }
+    },
+    "queues": {
+        "frame_queue_size": 10,
+        "processed_frame_queue_size": 10
+    }
+}
