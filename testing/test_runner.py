@@ -37,7 +37,8 @@ class SentryTestRunner:
         """Run performance test to measure threading efficiency"""
         print(f"\n=== Performance Test ===")
         print(f"Duration: {duration}s")
-        print(f"Video: {video_file or 'Camera'}")
+        video_source = video_file or "Synthetic frames (no camera)"
+        print(f"Video: {video_source}")
         
         controller = MasterController(
             video_file=video_file,
@@ -48,17 +49,29 @@ class SentryTestRunner:
         start_time = time.time()
         
         try:
-            # Start system
-            controller.start()
+            # Start system in a separate thread
+            import threading
+            controller_thread = threading.Thread(target=controller.start)
+            controller_thread.daemon = True
+            controller_thread.start()
+            
+            # Wait for startup
+            time.sleep(1)
             
             # Let it run for specified duration
-            time.sleep(duration)
+            for i in range(duration):
+                if not controller_thread.is_alive():
+                    break
+                time.sleep(1)
             
         except KeyboardInterrupt:
             print("Test interrupted by user")
         finally:
             # Stop and collect results
-            controller.stop()
+            try:
+                controller.stop()
+            except:
+                pass
             runtime = time.time() - start_time
             
             results = {

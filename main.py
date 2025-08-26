@@ -4,6 +4,8 @@ import threading
 import time
 import argparse
 import os
+import signal
+import sys
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -29,7 +31,9 @@ class MasterController:
         self.use_mock = use_mock
         
         # Initialize processing components
-        self.image_capture = ImageCaptureThread(self.frame_queue, video_file=video_file)
+        # Use synthetic frames if no video file specified (for testing without camera)
+        use_synthetic = video_file is None
+        self.image_capture = ImageCaptureThread(self.frame_queue, video_file=video_file, use_synthetic=use_synthetic)
         self.yolo_processor = YoloProcessor(self.frame_queue, self.processed_frame_queue, use_mock=use_mock)
         self.target_prediction = TargetPredictionModel()
         self.target_extrapolation = TargetExtrapolationModel()
@@ -55,7 +59,13 @@ class MasterController:
         if self.debug:
             print("=== NDS Sentry Debug Mode ===")
             print(f"Mock detection: {self.use_mock}")
-            print(f"Video file: {getattr(self.image_capture, 'video_file', 'Camera')}")
+            video_source = getattr(self.image_capture, 'video_file', None)
+            if video_source:
+                print(f"Video file: {video_source}")
+            elif getattr(self.image_capture, 'use_synthetic', False):
+                print("Video source: Synthetic frames (no camera)")
+            else:
+                print("Video source: Camera")
             print("Starting threads...")
         
         # Start capture and processing threads
@@ -71,8 +81,28 @@ class MasterController:
     def stop(self):
         """Stop all processing threads"""
         self.running = False
-        self.image_capture.stop()
-        self.yolo_processor.stop()
+        
+        if self.debug:
+            print("Stopping threads...")
+        
+        # Stop threads
+        if hasattr(self, 'image_capture'):
+            self.image_capture.stop()
+        if hasattr(self, 'yolo_processor'):
+            self.yolo_processor.stop()
+            
+        # Wait for threads to finish with timeout
+        try:
+            if hasattr(self, 'image_capture') and self.image_capture.is_alive():
+                self.image_capture.join(timeout=2.0)
+            if hasattr(self, 'yolo_processor') and self.yolo_processor.is_alive():
+                self.yolo_processor.join(timeout=2.0)
+        except Exception as e:
+            if self.debug:
+                print(f"Thread join error: {e}")
+                
+        if self.debug:
+            print("All threads stopped")
         
     def control_loop(self):
         """Main control loop that processes target data and controls servos"""
@@ -129,12 +159,18 @@ class MasterController:
                     self.print_debug_summary()
                     last_debug_time = time.time()
                 
+            except KeyboardInterrupt:
+                print("Control loop interrupted")
+                break
             except Exception as e:
                 # Handle timeout or other exceptions
                 if not self.running:
                     break
-                if "timed out" not in str(e).lower() and self.debug:
+                error_msg = str(e).lower()
+                if "timed out" not in error_msg and "empty" not in error_msg and self.debug:
                     print(f"Control loop exception: {e}")
+                    import traceback
+                    traceback.print_exc()
                 continue
                 
     def update_success_rate(self, confidence: float):
@@ -149,11 +185,18 @@ class MasterController:
         current_time = time.time()
         runtime = current_time - self.start_time if self.start_time else 0
         
-        print(f"[{runtime:.1f}s] {mode}: "
-              f"Raw=({processed_data.target_coords[0]:.3f},{processed_data.target_coords[1]:.3f}) "
-              f"Final=({final_coords[0]:.3f},{final_coords[1]:.3f}) "
-              f"Conf={processed_data.confidence:.3f} "
-              f"SuccessRate={self.current_success_rate:.3f}")
+        if processed_data.target_coords is not None:
+            print(f"[{runtime:.1f}s] {mode}: "
+                  f"Raw=({processed_data.target_coords[0]:.3f},{processed_data.target_coords[1]:.3f}) "
+                  f"Final=({final_coords[0]:.3f},{final_coords[1]:.3f}) "
+                  f"Conf={processed_data.confidence:.3f} "
+                  f"SuccessRate={self.current_success_rate:.3f}")
+        else:
+            print(f"[{runtime:.1f}s] {mode}: "
+                  f"Raw=None "
+                  f"Final=({final_coords[0]:.3f},{final_coords[1]:.3f}) "
+                  f"Conf={processed_data.confidence:.3f} "
+                  f"SuccessRate={self.current_success_rate:.3f}")
         
     def print_debug_summary(self):
         """Print periodic debug summary"""
@@ -200,15 +243,28 @@ def main():
         use_mock=use_mock
     )
     
-    try:
-        controller.start()
-    except KeyboardInterrupt:
-        print("\nShutting down sentry system...")
+    # Set up signal handler for clean shutdown
+    def signal_handler(signum, frame):
+        print("\nShutdown signal received...")
         controller.stop()
-        
         if args.debug:
             print("\n=== FINAL STATISTICS ===")
             controller.print_debug_summary()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        controller.start()
+    except KeyboardInterrupt:
+        signal_handler(None, None)
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        controller.stop()
+        if args.debug:
+            import traceback
+            traceback.print_exc()
 
 if __name__ == "__main__":
     main()

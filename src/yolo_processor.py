@@ -110,11 +110,19 @@ class YoloProcessor(threading.Thread):
                     # Queue full, drop frame - acceptable for real-time processing
                     pass
                     
+            except KeyboardInterrupt:
+                print("YOLO processor interrupted")
+                break
             except Exception as e:
                 if self.running:
                     # Only log errors if we're supposed to be running
-                    if "timed out" not in str(e).lower():
+                    error_msg = str(e).lower()
+                    if "timed out" not in error_msg and "empty" not in error_msg:
                         print(f"Error in YOLO processing: {e}")
-                continue
+                        import traceback
+                        traceback.print_exc()
+                        break  # Exit on serious errors
+                else:
+                    break
                 
         print("YOLO processor thread stopped")

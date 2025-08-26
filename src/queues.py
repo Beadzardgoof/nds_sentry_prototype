@@ -13,14 +13,14 @@ class FrameQueue:
     def put(self, frame_data: FrameData, timeout: Optional[float] = None):
         """Put a frame into the queue with optional timeout"""
         try:
-            self._queue.put(frame_data, timeout=timeout)
+            self._queue.put(frame_data, block=False)
         except queue.Full:
             # Drop oldest frame if queue is full (real-time processing)
             try:
                 self._queue.get_nowait()
-                self._queue.put(frame_data, timeout=timeout)
-            except queue.Empty:
-                pass
+                self._queue.put(frame_data, block=False)
+            except (queue.Empty, queue.Full):
+                pass  # Unable to add frame, drop it
                 
     def get(self, timeout: Optional[float] = None) -> FrameData:
         """Get a frame from the queue with optional timeout"""
@@ -44,14 +44,14 @@ class ProcessedFrameQueue:
     def put(self, processed_data: ProcessedFrameData, timeout: Optional[float] = None):
         """Put processed frame data into the queue with optional timeout"""
         try:
-            self._queue.put(processed_data, timeout=timeout)
+            self._queue.put(processed_data, block=False)
         except queue.Full:
             # Drop oldest processed frame if queue is full
             try:
                 self._queue.get_nowait()
-                self._queue.put(processed_data, timeout=timeout)
-            except queue.Empty:
-                pass
+                self._queue.put(processed_data, block=False)
+            except (queue.Empty, queue.Full):
+                pass  # Unable to add frame, drop it
                 
     def get(self, timeout: Optional[float] = None) -> ProcessedFrameData:
         """Get processed frame data from the queue with optional timeout"""
