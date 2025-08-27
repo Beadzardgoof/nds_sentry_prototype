@@ -6,6 +6,7 @@ import argparse
 import os
 import signal
 import sys
+import queue
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -125,7 +126,7 @@ class MasterController:
                         # High success rate - use target prediction model
                         predicted_coords = self.target_prediction.predict(
                             processed_data.target_coords, 
-                            processed_data.frame_label
+                            processed_data.processed_frame_label
                         )
                         self.servo_controller.move_to_target(predicted_coords)
                         self.prediction_count += 1
@@ -136,7 +137,7 @@ class MasterController:
                         # Low success rate - use extrapolation model as fallback
                         extrapolated_coords = self.target_extrapolation.extrapolate(
                             processed_data.target_coords,
-                            processed_data.frame_label
+                            processed_data.processed_frame_label
                         )
                         self.servo_controller.move_to_target(extrapolated_coords)
                         self.extrapolation_count += 1
@@ -162,12 +163,21 @@ class MasterController:
             except KeyboardInterrupt:
                 print("Control loop interrupted")
                 break
+            except queue.Empty:
+                # Normal timeout when no frames available
+                continue
             except Exception as e:
                 # Handle timeout or other exceptions
                 if not self.running:
                     break
+                    
                 error_msg = str(e).lower()
-                if "timed out" not in error_msg and "empty" not in error_msg and self.debug:
+                # These are normal queue timeout/empty conditions - don't log them
+                if any(term in error_msg for term in ["timed out", "empty", "timeout"]):
+                    continue
+                    
+                # Log unexpected errors only
+                if self.debug:
                     print(f"Control loop exception: {e}")
                     import traceback
                     traceback.print_exc()

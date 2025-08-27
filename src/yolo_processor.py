@@ -1,5 +1,6 @@
 import threading
 import time
+import queue
 import cv2
 import numpy as np
 from typing import Optional, Tuple, List
@@ -113,6 +114,9 @@ class YoloProcessor(threading.Thread):
             except KeyboardInterrupt:
                 print("YOLO processor interrupted")
                 break
+            except queue.Empty:
+                # Normal timeout when no frames available
+                continue
             except Exception as e:
                 if self.running:
                     # Only log errors if we're supposed to be running

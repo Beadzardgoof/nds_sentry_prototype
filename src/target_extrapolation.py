@@ -164,7 +164,7 @@ class TargetExtrapolationModel:
             return self.target_history[-1][0]
             
         # Analyze recent movement for patterns
-        positions = [pos for pos, _ in self.target_history[-10:]]
+        positions = [pos for pos, _ in list(self.target_history)[-10:]]
         
         # Check for circular/orbital patterns
         circular_center = self._detect_circular_pattern(positions)

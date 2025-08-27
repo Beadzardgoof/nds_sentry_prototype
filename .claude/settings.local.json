@@ -1,8 +1,14 @@
 {
-  "outputStyle": "default",
   "permissions": {
     "allow": [
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(python test:*)",
+      "Bash(timeout 10 python:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(python:*)",
+      "Bash(timeout:*)"
     ]
-  }
+  },
+  "outputStyle": "default"
 }

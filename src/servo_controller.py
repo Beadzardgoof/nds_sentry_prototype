@@ -132,7 +132,7 @@ class ServoController:
             
             # For debugging - print movement commands
             if abs(pan_angle - self.current_pan_angle) > 0.1 or abs(tilt_angle - self.current_tilt_angle) > 0.1:
-                print(f"Servo move: Pan={pan_angle:.1f}°, Tilt={tilt_angle:.1f}°")
+                print(f"Servo move: Pan={pan_angle:.1f}deg, Tilt={tilt_angle:.1f}deg")
             
             # Update current positions
             self.current_pan_angle = pan_angle

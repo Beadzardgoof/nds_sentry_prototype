@@ -184,7 +184,7 @@ class MockYoloDetector:
         
         # Apply temporal consistency - prefer targets near previous detections
         if self.previous_detections:
-            for prev_detection in self.previous_detections[-3:]:  # Last 3 detections
+            for prev_detection in list(self.previous_detections)[-3:]:  # Last 3 detections
                 prev_x, prev_y = prev_detection['coords']
                 
                 for target in valid_targets:
