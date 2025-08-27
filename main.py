@@ -20,6 +20,7 @@ from src.target_extrapolation import TargetExtrapolationModel
 from src.servo_controller import ServoController
 from src.frame_data import FrameData, ProcessedFrameData
 from src.queues import FrameQueue, ProcessedFrameQueue
+from src.thread_pool_manager import ThreadPoolManager, ThreadType
 
 class MasterController:
     def __init__(self, video_file=None, debug=False, use_mock=True):
@@ -30,6 +31,9 @@ class MasterController:
         # Debug and configuration options
         self.debug = debug
         self.use_mock = use_mock
+        
+        # Initialize thread pool manager
+        self.thread_pool = ThreadPoolManager(max_threads=20)
         
         # Initialize processing components
         # Use synthetic frames if no video file specified (for testing without camera)
@@ -44,12 +48,14 @@ class MasterController:
         self.success_rate_threshold = 0.8
         self.current_success_rate = 0.0
         self.running = False
+        self.mode = "prediction"  # Track current mode: "prediction" or "extrapolation"
         
         # Debug statistics
         self.frame_count = 0
         self.detection_count = 0
         self.prediction_count = 0
         self.extrapolation_count = 0
+        self.scan_pattern_count = 0
         self.start_time = None
         
     def start(self):
@@ -108,7 +114,9 @@ class MasterController:
     def control_loop(self):
         """Main control loop that processes target data and controls servos"""
         last_debug_time = time.time()
+        last_rebalance_time = time.time()
         debug_interval = 2.0  # Print debug info every 2 seconds
+        rebalance_interval = 0.1  # Rebalance threads every 100ms
         
         while self.running:
             try:
@@ -116,14 +124,34 @@ class MasterController:
                 processed_data = self.processed_frame_queue.get(timeout=0.1)
                 self.frame_count += 1
                 
-                if processed_data.target_coords is not None:
+                # Check frame freshness
+                if not processed_data.is_fresh(max_age=0.1):
+                    if self.debug:
+                        print("Stale frame detected, skipping")
+                    continue
+                
+                # Update thread pool with success/failure information
+                has_detection = processed_data.target_coords is not None
+                self.thread_pool.update_failure_rate(has_detection)
+                
+                if has_detection:
                     self.detection_count += 1
                     
                     # Update success rate based on detection confidence
                     self.update_success_rate(processed_data.confidence)
                     
-                    if self.current_success_rate >= self.success_rate_threshold:
-                        # High success rate - use target prediction model
+                    # Check if we need to switch modes based on failure rate prediction
+                    if self.thread_pool.should_switch_to_extrapolation() and self.mode != "extrapolation":
+                        self.mode = "extrapolation"
+                        if self.debug:
+                            print("Switching to EXTRAPOLATION mode")
+                    elif self.thread_pool.should_switch_to_prediction() and self.mode != "prediction":
+                        self.mode = "prediction"
+                        if self.debug:
+                            print("Switching to PREDICTION mode")
+                    
+                    if self.mode == "prediction":
+                        # Use prediction model for coordinates
                         predicted_coords = self.target_prediction.predict(
                             processed_data.target_coords, 
                             processed_data.processed_frame_label
@@ -134,26 +162,53 @@ class MasterController:
                         if self.debug:
                             self.print_debug_info(processed_data, "PREDICTION", predicted_coords)
                     else:
-                        # Low success rate - use extrapolation model as fallback
+                        # Use extrapolation model for scan patterns
+                        if processed_data.has_scan_pattern():
+                            # Execute scan pattern
+                            self.servo_controller.execute_scan_pattern(processed_data.scan_pattern)
+                            self.scan_pattern_count += 1
+                            
+                            if self.debug:
+                                pattern = processed_data.scan_pattern
+                                self.print_debug_info(processed_data, f"SCAN_{pattern.pattern_type.value.upper()}", 
+                                                    pattern.center_coords)
+                        else:
+                            # Fallback to coordinate extrapolation
+                            extrapolated_coords = self.target_extrapolation.extrapolate(
+                                processed_data.target_coords,
+                                processed_data.processed_frame_label
+                            )
+                            self.servo_controller.move_to_target(extrapolated_coords)
+                            self.extrapolation_count += 1
+                            
+                            if self.debug:
+                                self.print_debug_info(processed_data, "EXTRAPOLATION", extrapolated_coords)
+                else:
+                    # No detection - generate scan pattern or fallback
+                    if processed_data.has_scan_pattern():
+                        # Execute scan pattern from extrapolation thread
+                        self.servo_controller.execute_scan_pattern(processed_data.scan_pattern)
+                        self.scan_pattern_count += 1
+                        
+                        if self.debug:
+                            pattern = processed_data.scan_pattern
+                            self.print_debug_info(processed_data, f"SEARCH_{pattern.pattern_type.value.upper()}", 
+                                                pattern.center_coords)
+                    else:
+                        # Fallback to coordinate extrapolation
                         extrapolated_coords = self.target_extrapolation.extrapolate(
-                            processed_data.target_coords,
-                            processed_data.processed_frame_label
+                            None, processed_data.processed_frame_label
                         )
                         self.servo_controller.move_to_target(extrapolated_coords)
                         self.extrapolation_count += 1
                         
                         if self.debug:
-                            self.print_debug_info(processed_data, "EXTRAPOLATION", extrapolated_coords)
-                else:
-                    # No detection - use extrapolation model
-                    extrapolated_coords = self.target_extrapolation.extrapolate(
-                        None, processed_data.processed_frame_label
-                    )
-                    self.servo_controller.move_to_target(extrapolated_coords)
-                    self.extrapolation_count += 1
-                    
-                    if self.debug:
-                        self.print_debug_info(processed_data, "NO_DETECTION", extrapolated_coords)
+                            self.print_debug_info(processed_data, "NO_DETECTION", extrapolated_coords)
+                
+                # Rebalance thread pool periodically
+                if time.time() - last_rebalance_time > rebalance_interval:
+                    self.thread_pool.rebalance_threads()
+                    last_rebalance_time = time.time()
                 
                 # Print periodic debug summary
                 if self.debug and time.time() - last_debug_time > debug_interval:
@@ -214,15 +269,64 @@ class MasterController:
         fps = self.frame_count / runtime if runtime > 0 else 0
         detection_rate = self.detection_count / self.frame_count if self.frame_count > 0 else 0
         
+        # Get thread pool status
+        thread_status = self.thread_pool.get_status()
+        
         print(f"\n=== DEBUG SUMMARY [{runtime:.1f}s] ===")
+        print(f"Mode: {self.mode.upper()}")
         print(f"Frames processed: {self.frame_count} ({fps:.1f} FPS)")
         print(f"Detections: {self.detection_count} ({detection_rate:.1%})")
         print(f"Predictions: {self.prediction_count}")
         print(f"Extrapolations: {self.extrapolation_count}")
+        print(f"Scan patterns: {self.scan_pattern_count}")
         print(f"Current success rate: {self.current_success_rate:.3f}")
+        print(f"Thread pool failure rate: {thread_status['failure_rate']:.3f}")
+        print(f"Prediction threshold triggered: {thread_status['prediction_threshold']}")
         print(f"Frame queue size: {self.frame_queue.qsize()}")
         print(f"Processed queue size: {self.processed_frame_queue.qsize()}")
-        print("=" * 40)
+        print(f"Active threads: {thread_status['total_threads']}/{thread_status['max_threads']}")
+        
+        # Show thread allocation
+        allocations = thread_status['allocations']
+        for thread_type, count in allocations.items():
+            if count > 0:
+                print(f"  {thread_type}: {count}")
+        
+        print("=" * 50)
+
+    def get_thread_pool_status(self):
+        """Get thread pool status for testing"""
+        return self.thread_pool.get_status()
+
+    def stop(self):
+        """Stop all processing threads"""
+        self.running = False
+        
+        if self.debug:
+            print("Stopping threads...")
+        
+        # Stop thread pool
+        if hasattr(self, 'thread_pool'):
+            self.thread_pool.shutdown()
+        
+        # Stop threads
+        if hasattr(self, 'image_capture'):
+            self.image_capture.stop()
+        if hasattr(self, 'yolo_processor'):
+            self.yolo_processor.stop()
+            
+        # Wait for threads to finish with timeout
+        try:
+            if hasattr(self, 'image_capture') and self.image_capture.is_alive():
+                self.image_capture.join(timeout=2.0)
+            if hasattr(self, 'yolo_processor') and self.yolo_processor.is_alive():
+                self.yolo_processor.join(timeout=2.0)
+        except Exception as e:
+            if self.debug:
+                print(f"Thread join error: {e}")
+                
+        if self.debug:
+            print("All threads stopped")
 
 def main():
     parser = argparse.ArgumentParser(description="NDS Sentry Target Tracking System")

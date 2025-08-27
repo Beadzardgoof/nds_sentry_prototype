@@ -74,15 +74,24 @@ class SentryTestRunner:
                 pass
             runtime = time.time() - start_time
             
+            # Get thread pool status
+            thread_status = controller.get_thread_pool_status()
+            
             results = {
                 'duration': runtime,
                 'frames_processed': controller.frame_count,
                 'detections': controller.detection_count,
                 'predictions': controller.prediction_count,
                 'extrapolations': controller.extrapolation_count,
+                'scan_patterns': controller.scan_pattern_count,
                 'fps': controller.frame_count / runtime if runtime > 0 else 0,
                 'detection_rate': controller.detection_count / controller.frame_count if controller.frame_count > 0 else 0,
-                'final_success_rate': controller.current_success_rate
+                'final_success_rate': controller.current_success_rate,
+                'final_mode': controller.mode,
+                'thread_pool_status': thread_status,
+                'thread_utilization': thread_status['total_threads'] / thread_status['max_threads'],
+                'failure_rate': thread_status['failure_rate'],
+                'mode_switches': getattr(controller, 'mode_switches', 0)  # Track if added later
             }
             
             return results
@@ -112,7 +121,9 @@ class SentryTestRunner:
             all_results[video_file.name] = results
             
             print(f"Results: {results['fps']:.1f} FPS, "
-                  f"{results['detection_rate']:.1%} detection rate")
+                  f"{results['detection_rate']:.1%} detection rate, "
+                  f"Mode: {results['final_mode']}, "
+                  f"Thread util: {results['thread_utilization']:.1%}")
                   
         return all_results
         
@@ -172,13 +183,84 @@ class SentryTestRunner:
         print(f"  Detection rate: {results.get('detection_rate', 0):.1%}")
         print(f"  Predictions: {results.get('predictions', 0)}")
         print(f"  Extrapolations: {results.get('extrapolations', 0)}")
+        print(f"  Scan patterns: {results.get('scan_patterns', 0)}")
         print(f"  Final success rate: {results.get('final_success_rate', 0):.3f}")
+        print(f"  Final mode: {results.get('final_mode', 'unknown')}")
+        print(f"  Thread utilization: {results.get('thread_utilization', 0):.1%}")
+        print(f"  Final failure rate: {results.get('failure_rate', 0):.3f}")
+        
+        # Show thread allocation if available
+        if 'thread_pool_status' in results:
+            thread_status = results['thread_pool_status']
+            allocations = thread_status.get('allocations', {})
+            print("  Thread allocation:")
+            for thread_type, count in allocations.items():
+                if count > 0:
+                    print(f"    {thread_type}: {count}")
+
+    def run_scan_pattern_test(self):
+        """Test scan pattern functionality specifically"""
+        print(f"\n=== Scan Pattern Test ===")
+        
+        controller = MasterController(
+            debug=True,
+            use_mock=True
+        )
+        
+        # Force low detection rate to trigger scan patterns
+        # This would require modifying the mock YOLO to simulate poor detection
+        print("Testing scan pattern generation under poor detection conditions...")
+        
+        start_time = time.time()
+        
+        try:
+            # Start system
+            import threading
+            controller_thread = threading.Thread(target=controller.start)
+            controller_thread.daemon = True
+            controller_thread.start()
+            
+            # Wait for startup
+            time.sleep(1)
+            
+            # Monitor for scan patterns for 30 seconds
+            test_duration = 30
+            for i in range(test_duration):
+                if not controller_thread.is_alive():
+                    break
+                    
+                if i % 5 == 0:  # Check every 5 seconds
+                    status = controller.get_thread_pool_status()
+                    print(f"[{i}s] Mode: {controller.mode}, "
+                          f"Scan patterns: {controller.scan_pattern_count}, "
+                          f"Failure rate: {status['failure_rate']:.3f}")
+                
+                time.sleep(1)
+            
+        except KeyboardInterrupt:
+            print("Scan pattern test interrupted")
+        finally:
+            controller.stop()
+            runtime = time.time() - start_time
+            
+            # Results specific to scan pattern testing
+            results = {
+                'duration': runtime,
+                'scan_patterns_generated': controller.scan_pattern_count,
+                'total_frames': controller.frame_count,
+                'scan_pattern_rate': controller.scan_pattern_count / controller.frame_count if controller.frame_count > 0 else 0,
+                'final_mode': controller.mode,
+                'thread_pool_status': controller.get_thread_pool_status()
+            }
+            
+            return results
 
 def main():
     parser = argparse.ArgumentParser(description="NDS Sentry Test Runner")
     parser.add_argument("--perf", action="store_true", help="Run performance test")
     parser.add_argument("--video-suite", action="store_true", help="Run full video test suite")
     parser.add_argument("--stress", action="store_true", help="Run threading stress test")
+    parser.add_argument("--scan-patterns", action="store_true", help="Test scan pattern functionality")
     parser.add_argument("--video", "-v", type=str, help="Specific video file to test")
     parser.add_argument("--duration", "-d", type=int, default=30, help="Test duration in seconds")
     parser.add_argument("--all", action="store_true", help="Run all tests")
@@ -192,12 +274,14 @@ def main():
         perf_results = runner.run_performance_test(duration=args.duration)
         video_results = runner.run_video_test_suite()
         stress_results = runner.run_threading_stress_test()
+        scan_results = runner.run_scan_pattern_test()
         
         print("\n" + "="*60)
         print("COMPREHENSIVE TEST RESULTS")
         print("="*60)
         runner.print_test_report(perf_results)
         runner.print_test_report(video_results)
+        runner.print_test_report({"scan_pattern_test": scan_results})
         
     elif args.perf:
         results = runner.run_performance_test(args.video, args.duration)
@@ -211,11 +295,16 @@ def main():
         results = runner.run_threading_stress_test()
         runner.print_test_report(results)
         
+    elif args.scan_patterns:
+        results = runner.run_scan_pattern_test()
+        runner.print_test_report({"scan_pattern_test": results})
+        
     else:
         print("No test specified. Use --help for options.")
         print("Quick test options:")
         print("  python test_runner.py --perf")
-        print("  python test_runner.py --video-suite")
+        print("  python test_runner.py --video-suite") 
+        print("  python test_runner.py --scan-patterns")
         print("  python test_runner.py --all")
 
 if __name__ == "__main__":

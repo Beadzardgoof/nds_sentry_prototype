@@ -1,12 +1,14 @@
 import time
 import threading
+import math
 from typing import Tuple, Optional
 import numpy as np
+from .frame_data import ScanPattern, ScanPatternType
 
 class ServoController:
     """
-    Controls two servos (pan/tilt) to track targets based on predicted coordinates.
-    Handles coordinate transformation from normalized image coordinates to servo angles.
+    Controls two servos (pan/tilt) to track targets or execute scan patterns.
+    Handles coordinate transformation and scan pattern interpretation.
     """
     
     def __init__(self):
@@ -32,6 +34,11 @@ class ServoController:
         # Camera and servo calibration parameters
         self.camera_fov_horizontal = 90  # Horizontal field of view in degrees
         self.camera_fov_vertical = 60    # Vertical field of view in degrees
+        
+        # Scan pattern execution state
+        self.current_scan_pattern = None
+        self.scan_start_time = 0.0
+        self.scan_position_progress = 0.0
         
         # Servo communication (placeholder for actual servo driver)
         self.servo_driver = None
@@ -63,6 +70,9 @@ class ServoController:
             target_coords: (x, y) coordinates in normalized range [0, 1]
         """
         with self.control_lock:
+            # Clear any active scan pattern
+            self.current_scan_pattern = None
+            
             # Convert normalized coordinates to servo angles
             pan_angle, tilt_angle = self.coords_to_angles(target_coords)
             
@@ -73,6 +83,146 @@ class ServoController:
             # Check if movement is significant enough
             if self.should_move(smoothed_pan, smoothed_tilt):
                 self.move_to_angle(smoothed_pan, smoothed_tilt)
+
+    def execute_scan_pattern(self, scan_pattern: ScanPattern):
+        """
+        Execute a scan pattern for target search
+        Args:
+            scan_pattern: ScanPattern object with pattern parameters
+        """
+        with self.control_lock:
+            # Update current scan pattern
+            if (self.current_scan_pattern is None or 
+                self.current_scan_pattern.pattern_type != scan_pattern.pattern_type):
+                self.current_scan_pattern = scan_pattern
+                self.scan_start_time = time.time()
+                self.scan_position_progress = 0.0
+            
+            # Calculate next position in scan pattern
+            pan_angle, tilt_angle = self.calculate_scan_position(scan_pattern)
+            
+            # Move to calculated position
+            if self.should_move(pan_angle, tilt_angle):
+                self.move_to_angle(pan_angle, tilt_angle)
+
+    def calculate_scan_position(self, pattern: ScanPattern) -> Tuple[float, float]:
+        """Calculate current position in scan pattern"""
+        current_time = time.time()
+        elapsed_time = current_time - self.scan_start_time
+        
+        # Convert center coordinates to angles
+        center_pan, center_tilt = self.coords_to_angles(pattern.center_coords)
+        
+        # Calculate pattern-specific offset
+        if pattern.pattern_type == ScanPatternType.CIRCULAR:
+            return self._calculate_circular_position(pattern, elapsed_time, center_pan, center_tilt)
+        elif pattern.pattern_type == ScanPatternType.SPIRAL:
+            return self._calculate_spiral_position(pattern, elapsed_time, center_pan, center_tilt)
+        elif pattern.pattern_type == ScanPatternType.GRID:
+            return self._calculate_grid_position(pattern, elapsed_time, center_pan, center_tilt)
+        elif pattern.pattern_type == ScanPatternType.LINEAR_SWEEP:
+            return self._calculate_linear_sweep_position(pattern, elapsed_time, center_pan, center_tilt)
+        elif pattern.pattern_type == ScanPatternType.PREDICTED_PATH:
+            return self._calculate_predicted_path_position(pattern, elapsed_time, center_pan, center_tilt)
+        else:
+            return (center_pan, center_tilt)
+
+    def _calculate_circular_position(self, pattern: ScanPattern, elapsed_time: float, 
+                                   center_pan: float, center_tilt: float) -> Tuple[float, float]:
+        """Calculate position for circular scan pattern"""
+        angle = pattern.direction + (elapsed_time * pattern.scan_speed)
+        radius_deg = pattern.search_radius * self.camera_fov_horizontal
+        
+        pan_offset = radius_deg * math.cos(angle)
+        tilt_offset = radius_deg * math.sin(angle)
+        
+        pan_angle = center_pan + pan_offset
+        tilt_angle = center_tilt + tilt_offset
+        
+        return self._clamp_angles(pan_angle, tilt_angle)
+
+    def _calculate_spiral_position(self, pattern: ScanPattern, elapsed_time: float,
+                                 center_pan: float, center_tilt: float) -> Tuple[float, float]:
+        """Calculate position for spiral scan pattern"""
+        angle = pattern.direction + (elapsed_time * pattern.scan_speed)
+        radius_growth = min(elapsed_time * 0.1, 1.0)  # Expand spiral over time
+        radius_deg = pattern.search_radius * self.camera_fov_horizontal * radius_growth
+        
+        pan_offset = radius_deg * math.cos(angle)
+        tilt_offset = radius_deg * math.sin(angle)
+        
+        pan_angle = center_pan + pan_offset
+        tilt_angle = center_tilt + tilt_offset
+        
+        return self._clamp_angles(pan_angle, tilt_angle)
+
+    def _calculate_grid_position(self, pattern: ScanPattern, elapsed_time: float,
+                               center_pan: float, center_tilt: float) -> Tuple[float, float]:
+        """Calculate position for grid scan pattern"""
+        grid_size = 5  # 5x5 grid
+        position_time = 1.0 / pattern.scan_speed  # Time per grid position
+        
+        total_positions = grid_size * grid_size
+        current_position = int((elapsed_time / position_time) % total_positions)
+        
+        grid_x = current_position % grid_size
+        grid_y = current_position // grid_size
+        
+        # Convert grid position to angles
+        radius_deg = pattern.search_radius * self.camera_fov_horizontal
+        step_size = (2 * radius_deg) / (grid_size - 1)
+        
+        pan_offset = (grid_x * step_size) - radius_deg
+        tilt_offset = (grid_y * step_size) - radius_deg
+        
+        pan_angle = center_pan + pan_offset
+        tilt_angle = center_tilt + tilt_offset
+        
+        return self._clamp_angles(pan_angle, tilt_angle)
+
+    def _calculate_linear_sweep_position(self, pattern: ScanPattern, elapsed_time: float,
+                                       center_pan: float, center_tilt: float) -> Tuple[float, float]:
+        """Calculate position for linear sweep pattern"""
+        sweep_range = pattern.search_radius * self.camera_fov_horizontal
+        sweep_period = 2.0 / pattern.scan_speed  # Time for one complete sweep
+        
+        # Calculate sweep progress (0 to 1 and back)
+        cycle_progress = (elapsed_time % sweep_period) / sweep_period
+        if cycle_progress > 0.5:
+            cycle_progress = 1.0 - cycle_progress
+        sweep_progress = cycle_progress * 2.0  # Scale to 0-1 range
+        
+        # Calculate position along sweep direction
+        sweep_offset = (sweep_progress - 0.5) * 2 * sweep_range
+        
+        pan_offset = sweep_offset * math.cos(pattern.direction)
+        tilt_offset = sweep_offset * math.sin(pattern.direction)
+        
+        pan_angle = center_pan + pan_offset
+        tilt_angle = center_tilt + tilt_offset
+        
+        return self._clamp_angles(pan_angle, tilt_angle)
+
+    def _calculate_predicted_path_position(self, pattern: ScanPattern, elapsed_time: float,
+                                         center_pan: float, center_tilt: float) -> Tuple[float, float]:
+        """Calculate position for predicted path pattern"""
+        # Follow predicted trajectory with some lead time
+        path_progress = elapsed_time * pattern.scan_speed
+        path_distance = pattern.search_radius * self.camera_fov_horizontal
+        
+        pan_offset = path_distance * math.cos(pattern.direction) * path_progress
+        tilt_offset = path_distance * math.sin(pattern.direction) * path_progress
+        
+        pan_angle = center_pan + pan_offset
+        tilt_angle = center_tilt + tilt_offset
+        
+        return self._clamp_angles(pan_angle, tilt_angle)
+
+    def _clamp_angles(self, pan_angle: float, tilt_angle: float) -> Tuple[float, float]:
+        """Clamp angles to servo limits"""
+        pan_clamped = np.clip(pan_angle, self.pan_min_angle, self.pan_max_angle)
+        tilt_clamped = np.clip(tilt_angle, self.tilt_min_angle, self.tilt_max_angle)
+        return (pan_clamped, tilt_clamped)
                 
     def coords_to_angles(self, coords: Tuple[float, float]) -> Tuple[float, float]:
         """
