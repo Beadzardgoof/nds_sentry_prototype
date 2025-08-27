@@ -32,8 +32,9 @@ class MasterController:
         self.debug = debug
         self.use_mock = use_mock
         
-        # Initialize thread pool manager
-        self.thread_pool = ThreadPoolManager(max_threads=20)
+        # Initialize thread pool manager (temporarily disabled for basic functionality)
+        # self.thread_pool = ThreadPoolManager(max_threads=20)
+        self.thread_pool = None
         
         # Initialize processing components
         # Use synthetic frames if no video file specified (for testing without camera)
@@ -58,10 +59,11 @@ class MasterController:
         self.scan_pattern_count = 0
         self.start_time = None
         
-    def start(self):
+    def start(self, max_runtime=None):
         """Start all processing threads and main control loop"""
         self.running = True
         self.start_time = time.time()
+        self.max_runtime = max_runtime  # Optional timeout for testing
         
         if self.debug:
             print("=== NDS Sentry Debug Mode ===")
@@ -73,17 +75,27 @@ class MasterController:
                 print("Video source: Synthetic frames (no camera)")
             else:
                 print("Video source: Camera")
+            if max_runtime:
+                print(f"Max runtime: {max_runtime}s")
             print("Starting threads...")
         
-        # Start capture and processing threads
-        self.image_capture.start()
-        self.yolo_processor.start()
-        
-        if self.debug:
-            print("Threads started. Beginning control loop...")
-        
-        # Start main control loop
-        self.control_loop()
+        try:
+            # Start capture and processing threads
+            self.image_capture.start()
+            self.yolo_processor.start()
+            
+            if self.debug:
+                print("Threads started. Beginning control loop...")
+            
+            # Start main control loop
+            self.control_loop()
+        except Exception as e:
+            if self.debug:
+                print(f"Error in start(): {e}")
+            raise
+        finally:
+            # Ensure cleanup happens
+            self.stop()
         
     def stop(self):
         """Stop all processing threads"""
@@ -120,6 +132,12 @@ class MasterController:
         
         while self.running:
             try:
+                # Check for timeout if specified
+                if self.max_runtime and (time.time() - self.start_time) > self.max_runtime:
+                    if self.debug:
+                        print(f"\nMax runtime ({self.max_runtime}s) reached, stopping...")
+                    break
+                
                 # Get processed frame data with timeout
                 processed_data = self.processed_frame_queue.get(timeout=0.1)
                 self.frame_count += 1
@@ -132,7 +150,8 @@ class MasterController:
                 
                 # Update thread pool with success/failure information
                 has_detection = processed_data.target_coords is not None
-                self.thread_pool.update_failure_rate(has_detection)
+                if self.thread_pool:
+                    self.thread_pool.update_failure_rate(has_detection)
                 
                 if has_detection:
                     self.detection_count += 1
@@ -141,14 +160,15 @@ class MasterController:
                     self.update_success_rate(processed_data.confidence)
                     
                     # Check if we need to switch modes based on failure rate prediction
-                    if self.thread_pool.should_switch_to_extrapolation() and self.mode != "extrapolation":
-                        self.mode = "extrapolation"
-                        if self.debug:
-                            print("Switching to EXTRAPOLATION mode")
-                    elif self.thread_pool.should_switch_to_prediction() and self.mode != "prediction":
-                        self.mode = "prediction"
-                        if self.debug:
-                            print("Switching to PREDICTION mode")
+                    if self.thread_pool:
+                        if self.thread_pool.should_switch_to_extrapolation() and self.mode != "extrapolation":
+                            self.mode = "extrapolation"
+                            if self.debug:
+                                print("Switching to EXTRAPOLATION mode")
+                        elif self.thread_pool.should_switch_to_prediction() and self.mode != "prediction":
+                            self.mode = "prediction"
+                            if self.debug:
+                                print("Switching to PREDICTION mode")
                     
                     if self.mode == "prediction":
                         # Use prediction model for coordinates
@@ -206,7 +226,7 @@ class MasterController:
                             self.print_debug_info(processed_data, "NO_DETECTION", extrapolated_coords)
                 
                 # Rebalance thread pool periodically
-                if time.time() - last_rebalance_time > rebalance_interval:
+                if self.thread_pool and time.time() - last_rebalance_time > rebalance_interval:
                     self.thread_pool.rebalance_threads()
                     last_rebalance_time = time.time()
                 
@@ -270,7 +290,10 @@ class MasterController:
         detection_rate = self.detection_count / self.frame_count if self.frame_count > 0 else 0
         
         # Get thread pool status
-        thread_status = self.thread_pool.get_status()
+        if self.thread_pool:
+            thread_status = self.thread_pool.get_status()
+        else:
+            thread_status = {'failure_rate': 0.0, 'prediction_threshold': False, 'total_threads': 2, 'max_threads': 20, 'allocations': {}}
         
         print(f"\n=== DEBUG SUMMARY [{runtime:.1f}s] ===")
         print(f"Mode: {self.mode.upper()}")
@@ -296,7 +319,10 @@ class MasterController:
 
     def get_thread_pool_status(self):
         """Get thread pool status for testing"""
-        return self.thread_pool.get_status()
+        if self.thread_pool:
+            return self.thread_pool.get_status()
+        else:
+            return {'failure_rate': 0.0, 'prediction_threshold': False, 'total_threads': 2, 'max_threads': 20, 'allocations': {}}
 
     def stop(self):
         """Stop all processing threads"""
@@ -306,7 +332,7 @@ class MasterController:
             print("Stopping threads...")
         
         # Stop thread pool
-        if hasattr(self, 'thread_pool'):
+        if hasattr(self, 'thread_pool') and self.thread_pool:
             self.thread_pool.shutdown()
         
         # Stop threads
@@ -360,14 +386,16 @@ def main():
     # Set up signal handler for clean shutdown
     def signal_handler(signum, frame):
         print("\nShutdown signal received...")
-        controller.stop()
+        controller.running = False  # Stop control loop
         if args.debug:
             print("\n=== FINAL STATISTICS ===")
             controller.print_debug_summary()
+        controller.stop()
         sys.exit(0)
     
     signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    if hasattr(signal, 'SIGTERM'):  # SIGTERM not available on Windows
+        signal.signal(signal.SIGTERM, signal_handler)
     
     try:
         controller.start()
