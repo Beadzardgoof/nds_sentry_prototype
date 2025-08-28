@@ -6,18 +6,25 @@ import os
 from typing import Tuple, List
 import random
 import math
+from pathlib import Path
 
 class MockVideoGenerator:
     """Generates mock test videos with simulated aircraft/drone targets for testing"""
     
-    def __init__(self, output_dir: str = "../data/mock_videos"):
-        self.output_dir = output_dir
+    def __init__(self, output_dir: str = None):
+        # Get the project root directory (parent of testing directory)
+        if output_dir is None:
+            project_root = Path(__file__).parent.parent
+            output_dir = project_root / "data" / "mock_videos"
+        
+        self.output_dir = str(output_dir)
         self.width = 1280
         self.height = 720
         self.fps = 30
         
         # Ensure output directory exists
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
+        print(f"Videos will be saved to: {os.path.abspath(self.output_dir)}")
         
     def generate_jet_video(self, filename: str = "jet_test_01.mp4", duration: int = 60):
         """Generate video with fast-moving jet aircraft"""
@@ -184,7 +191,7 @@ def main():
     generator.generate_mixed_targets_video()
     
     print("Mock video generation complete!")
-    print("Videos saved to: data/mock_videos/")
+    print(f"Videos saved to: {os.path.abspath(generator.output_dir)}")
 
 if __name__ == "__main__":
     main()
