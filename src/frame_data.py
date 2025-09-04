@@ -50,6 +50,7 @@ class ProcessedFrameData:
     confidence: float  # Detection confidence score or pattern confidence
     timestamp: float
     scan_pattern: Optional[ScanPattern] = None  # Scan pattern data - None if coordinates
+    original_frame: Optional[np.ndarray] = None  # Original frame for visualization
     
     def __post_init__(self):
         if self.timestamp is None:

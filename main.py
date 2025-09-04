@@ -21,9 +21,10 @@ from src.servo_controller import ServoController
 from src.frame_data import FrameData, ProcessedFrameData
 from src.queues import FrameQueue, ProcessedFrameQueue
 from src.thread_pool_manager import ThreadPoolManager, ThreadType
+from src.tracking_visualizer import TrackingVisualizer
 
 class MasterController:
-    def __init__(self, video_file=None, debug=False, use_mock=True):
+    def __init__(self, video_file=None, debug=False, use_mock=True, visualize=False):
         # Initialize queues
         self.frame_queue = FrameQueue(maxsize=10)
         self.processed_frame_queue = ProcessedFrameQueue(maxsize=10)
@@ -31,6 +32,7 @@ class MasterController:
         # Debug and configuration options
         self.debug = debug
         self.use_mock = use_mock
+        self.visualize = visualize
         
         # Initialize thread pool manager (temporarily disabled for basic functionality)
         # self.thread_pool = ThreadPoolManager(max_threads=20)
@@ -44,6 +46,9 @@ class MasterController:
         self.target_prediction = TargetPredictionModel()
         self.target_extrapolation = TargetExtrapolationModel()
         self.servo_controller = ServoController()
+        
+        # Initialize visualization if enabled
+        self.visualizer = TrackingVisualizer() if visualize else None
         
         # Control parameters
         self.success_rate_threshold = 0.8
@@ -174,10 +179,27 @@ class MasterController:
                         # Use prediction model for coordinates
                         predicted_coords = self.target_prediction.predict(
                             processed_data.target_coords, 
-                            processed_data.processed_frame_label
+                            processed_data.processed_frame_label,
+                            processed_data.confidence
                         )
                         self.servo_controller.move_to_target(predicted_coords)
                         self.prediction_count += 1
+                        
+                        # Visualization
+                        if self.visualizer and processed_data.original_frame is not None:
+                            vis_frame = self.visualizer.process_frame(
+                                frame=processed_data.original_frame,
+                                target_coords=processed_data.target_coords,
+                                camera_coords=predicted_coords,
+                                is_detected=True,
+                                mode="PREDICTION",
+                                confidence=processed_data.confidence,
+                                frame_rate=self.get_fps(),
+                                detection_rate=self.get_detection_rate(),
+                                predicted_coords=predicted_coords
+                            )
+                            cv2.imshow("Tracking Visualization", vis_frame)
+                            cv2.waitKey(1)
                         
                         if self.debug:
                             self.print_debug_info(processed_data, "PREDICTION", predicted_coords)
@@ -201,6 +223,21 @@ class MasterController:
                             self.servo_controller.move_to_target(extrapolated_coords)
                             self.extrapolation_count += 1
                             
+                            # Visualization
+                            if self.visualizer and processed_data.original_frame is not None:
+                                vis_frame = self.visualizer.process_frame(
+                                    frame=processed_data.original_frame,
+                                    target_coords=processed_data.target_coords,
+                                    camera_coords=extrapolated_coords,
+                                    is_detected=True,
+                                    mode="EXTRAPOLATION",
+                                    confidence=processed_data.confidence,
+                                    frame_rate=self.get_fps(),
+                                    detection_rate=self.get_detection_rate()
+                                )
+                                cv2.imshow("Tracking Visualization", vis_frame)
+                                cv2.waitKey(1)
+                            
                             if self.debug:
                                 self.print_debug_info(processed_data, "EXTRAPOLATION", extrapolated_coords)
                 else:
@@ -221,6 +258,21 @@ class MasterController:
                         )
                         self.servo_controller.move_to_target(extrapolated_coords)
                         self.extrapolation_count += 1
+                        
+                        # Visualization
+                        if self.visualizer and processed_data.original_frame is not None:
+                            vis_frame = self.visualizer.process_frame(
+                                frame=processed_data.original_frame,
+                                target_coords=None,  # No detection
+                                camera_coords=extrapolated_coords,
+                                is_detected=False,
+                                mode="NO_DETECTION",
+                                confidence=0.0,
+                                frame_rate=self.get_fps(),
+                                detection_rate=self.get_detection_rate()
+                            )
+                            cv2.imshow("Tracking Visualization", vis_frame)
+                            cv2.waitKey(1)
                         
                         if self.debug:
                             self.print_debug_info(processed_data, "NO_DETECTION", extrapolated_coords)
@@ -265,6 +317,15 @@ class MasterController:
         self.current_success_rate = (alpha * confidence + 
                                    (1 - alpha) * self.current_success_rate)
         
+    def get_fps(self) -> float:
+        """Get current frames per second rate"""
+        runtime = time.time() - self.start_time if self.start_time else 1
+        return self.frame_count / runtime if runtime > 0 else 0
+    
+    def get_detection_rate(self) -> float:
+        """Get current detection success rate as percentage"""
+        return (self.detection_count / self.frame_count * 100) if self.frame_count > 0 else 0
+    
     def print_debug_info(self, processed_data, mode, final_coords):
         """Print detailed debug information for each frame"""
         current_time = time.time()
@@ -360,6 +421,7 @@ def main():
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug output")
     parser.add_argument("--no-mock", action="store_true", help="Disable mock YOLO (use real model)")
     parser.add_argument("--list-videos", "-l", action="store_true", help="List available test videos")
+    parser.add_argument("--visualize", action="store_true", help="Enable real-time tracking visualization")
     
     args = parser.parse_args()
     
@@ -380,7 +442,8 @@ def main():
     controller = MasterController(
         video_file=args.video,
         debug=args.debug,
-        use_mock=use_mock
+        use_mock=use_mock,
+        visualize=args.visualize
     )
     
     # Set up signal handler for clean shutdown

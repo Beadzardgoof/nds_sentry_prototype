@@ -101,7 +101,8 @@ class YoloProcessor(threading.Thread):
                     target_coords=target_coords,
                     processed_frame_label=frame_data.frame_label,
                     confidence=confidence,
-                    timestamp=time.time()
+                    timestamp=time.time(),
+                    original_frame=frame_data.frame
                 )
                 
                 # Add to processed queue
